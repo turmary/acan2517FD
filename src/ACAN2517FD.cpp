@@ -430,6 +430,9 @@ uint32_t ACAN2517FD::begin (const ACAN2517FDSettings & inSettings,
     data8 |= inSettings.mControllerTransmitFIFOPayload << 5 ; // Payload
     writeRegister8 (FIFOCON_REGISTER (TRANSMIT_FIFO_INDEX) + 3, data8) ;
     data8 = 1 << 7 ; // FIFO is a Tx FIFO
+    if (inSettings.mControllerTransmitFIFORetransmissionAttempts != ACAN2517FDSettings::UnlimitedNumber) {
+      data8 |= 1 << 4 ; // Transmit Attempts Exhausted
+    }
     writeRegister8 (FIFOCON_REGISTER (TRANSMIT_FIFO_INDEX), data8) ;
     mTransmitFIFOPayload = ACAN2517FDSettings::objectSizeForPayload (inSettings.mControllerTransmitFIFOPayload) ;
   //----------------------------------- Configure receive filters
@@ -450,6 +453,11 @@ uint32_t ACAN2517FD::begin (const ACAN2517FDSettings & inSettings,
     data8  = (1 << 1) ; // Receive FIFO Interrupt Enable
     data8 |= (1 << 0) ; // Transmit FIFO Interrupt Enable
     writeRegister8 (INT_REGISTER + 2, data8) ;
+    if (inSettings.mControllerTransmitFIFORetransmissionAttempts != ACAN2517FDSettings::UnlimitedNumber) {
+      data8 = 1 << 2 ; // Transmit Attempts Exhausted
+      data8 |= (1 << 5) ; // CAN Bus Error Interrupt Enable
+      writeRegister8 (INT_REGISTER + 3, data8) ;
+    }
   //----------------------------------- Program nominal bit rate (NBTCFG register)
   //  bits 31-24: BRP - 1
   //  bits 23-16: TSEG1 - 1
@@ -570,6 +578,7 @@ bool ACAN2517FD::enterInTransmitBuffer (const CANFDMessage & inMessage) {
     const uint8_t status = readRegister8Assume_SPI_transaction (FIFOSTA_REGISTER (TRANSMIT_FIFO_INDEX)) ;
     if ((status & 1) == 0) { // FIFO is full
       uint8_t data8 = 1 << 7 ;  // FIFO is a transmit FIFO
+      data8 |= 1 << 4 ; // Transmit Attempts Exhausted
       data8 |= 1 ; // Enable "FIFO not full" interrupt
       writeRegister8Assume_SPI_transaction (FIFOCON_REGISTER (TRANSMIT_FIFO_INDEX), data8) ;
       mHardwareTxFIFOFull = true ;
@@ -837,6 +846,14 @@ bool ACAN2517FD::isr_core (void) {
         writeRegister8Assume_SPI_transaction (INT_REGISTER, ~ (1 << 3)) ;
         handled = true ;
       }
+      if ((it & (1 << 15)) != 0) { // IVMIF interrupt
+        writeRegister8Assume_SPI_transaction (INT_REGISTER + 1, (uint8_t)~ (1 << 7)) ;
+        handled = true ;
+      }
+      if ((it & (1 << 13)) != 0) { // CERRIF interrupt
+        writeRegister8Assume_SPI_transaction (INT_REGISTER + 1, ~ (1 << 5)) ;
+        handled = true ;
+      }
       if ((it & (1 << 12)) != 0) { // SERRIF interrupt
         writeRegister8Assume_SPI_transaction (INT_REGISTER + 1, ~ (1 << 4)) ;
         handled = true ;
@@ -847,6 +864,16 @@ bool ACAN2517FD::isr_core (void) {
           mHardwareReceiveBufferOverflowCount += 1 ;
         }
         writeRegister8Assume_SPI_transaction (FIFOSTA_REGISTER (RECEIVE_FIFO_INDEX), ~ (1 << 3)) ;
+      }
+      if ((it & (1 << 10)) != 0) { // TXATIF interrupt
+        const uint8_t status = readRegister8Assume_SPI_transaction (FIFOSTA_REGISTER (TRANSMIT_FIFO_INDEX)) ;
+        if (status & (0xF << 4)) { // FIFOSTA TXABT, TXLARB, TXERR, TXATIF
+          uint8_t data8;
+          data8 = ~ (0xF << 4) ;
+          writeRegister8Assume_SPI_transaction (FIFOSTA_REGISTER (TRANSMIT_FIFO_INDEX), data8);
+        }
+        writeRegister8Assume_SPI_transaction (INT_REGISTER + 1, ~ (1 << 2)) ;
+        handled = true ;
       }
     #ifdef ARDUINO_ARCH_ESP32
       taskENABLE_INTERRUPTS () ;
